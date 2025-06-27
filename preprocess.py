@@ -14,7 +14,7 @@ from sklearn.preprocessing import OneHotEncoder
 from multiprocessing import Pool
 from multiprocessing import cpu_count
 from tqdm import trange
-import utils.provider as provider
+#import utils.provider as provider
 RESIDUE_Forbidden_SET={"FAD"}
 CUT_OFF=8
 
@@ -57,12 +57,14 @@ def Write_Interface(line_list,pdb_path,ext_file):
     return new_path
     
 
-def Extract_Interface(pdb_path):
+def Extract_Interface(pdb_path, chain_ids_1=['A'], chain_ids_2=['B']):
     """
     Input:
         pdb_path: pdb_path
+        chain_ids_1: receptor chain ID list
+        chain_ids_2: ligand chain ID list
     Return:
-        final_receptor: list of all recptor atom lines
+        final_receptor: list of all receptor atom lines
         final_ligand: list of all ligand atom lines
     """
     receptor_list=[]
@@ -71,74 +73,62 @@ def Extract_Interface(pdb_path):
     llist=[]
     count_r=0
     count_l=0
+
+    # receptorとligandの残基をグループ化するための状態変数
+    tmp_r_list = []
+    pre_r_residue_id = None
+    tmp_l_list = []
+    pre_l_residue_id = None
+
     with open(pdb_path,'r') as file:
-        line = file.readline()               # call readline()
-        while line[0:4]!='ATOM':
-            line=file.readline()
-        atomid = 0
-        count = 1
-        goon = False
-        chain_id = line[21]
-        first_chain_id = chain_id
-        residue_type = line[17:20]
-        pre_residue_type = residue_type
-        tmp_list = []
-        pre_residue_id = 0
-        pre_chain_id = line[21]
-        first_change=True
+        line = file.readline()
         while line:
+            if line.startswith('ATOM'):
+                current_chain_id = line[21]
+                
+                try:
+                    # 残基IDを使って新しい残基を識別する
+                    current_residue_id = int(line[22:26].strip())
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                    atom_type = line[13:16].strip()
+                except (ValueError, IndexError):
+                    line = file.readline()
+                    continue
 
-            dat_in = line[0:80].split()
-            if len(dat_in) == 0:
-                line = file.readline()
-                continue
-
-            if (dat_in[0] == 'ATOM'):
-                chain_id = line[21]
-                residue_id = int(line[23:26])
-
-                x = float(line[30:38])
-                y = float(line[38:46])
-                z = float(line[46:54])
-                residue_type = line[17:20]
-                # First try CA distance of contact map
-                atom_type = line[13:16].strip()
-                if chain_id!=first_chain_id:
-                    goon=True
-                if (goon):
-                    if first_change:
-                        rlist.append(tmp_list)
-                        tmp_list = []
-                        tmp_list.append([x, y, z, atom_type, count_l])
-                        count_l += 1
-                        ligand_list.append(line)
-                        first_change=False
-                    else:
-                        ligand_list.append(line)  # used to prepare write interface region
-                        if pre_residue_type == residue_type:
-                            tmp_list.append([x, y, z, atom_type, count_l])
-                        else:
-                            llist.append(tmp_list)
-                            tmp_list = []
-                            tmp_list.append([x, y, z, atom_type, count_l])
-                        count_l += 1
-                else:
+                if current_chain_id in chain_ids_1:
                     receptor_list.append(line)
-                    if pre_residue_type == residue_type:
-                        tmp_list.append([x, y, z, atom_type, count_r])
-                    else:
-                        rlist.append(tmp_list)
-                        tmp_list = []
-                        tmp_list.append([x, y, z, atom_type, count_r])
+                    # 残基IDが変わったら、前の残基を保存して新しい残基を開始
+                    if pre_r_residue_id is not None and current_residue_id != pre_r_residue_id:
+                        if tmp_r_list:
+                            rlist.append(tmp_r_list)
+                        tmp_r_list = []
+                    
+                    tmp_r_list.append([x, y, z, atom_type, count_r])
+                    pre_r_residue_id = current_residue_id
                     count_r += 1
 
-                atomid = int(dat_in[1])
-                chain_id = line[21]
-                count = count + 1
-                pre_residue_type = residue_type
-                pre_residue_id = residue_id
-                pre_chain_id = chain_id
+                elif current_chain_id in chain_ids_2:
+                    ligand_list.append(line)
+                    # 残基IDが変わったら、前の残基を保存して新しい残基を開始
+                    if pre_l_residue_id is not None and current_residue_id != pre_l_residue_id:
+                        if tmp_l_list:
+                            llist.append(tmp_l_list)
+                        tmp_l_list = []
+
+                    tmp_l_list.append([x, y, z, atom_type, count_l])
+                    pre_l_residue_id = current_residue_id
+                    count_l += 1
+            
             line = file.readline()
+
+    # ループの後に最後の残基を追加
+    if tmp_r_list:
+        rlist.append(tmp_r_list)
+    if tmp_l_list:
+        llist.append(tmp_l_list)
+
     print("Extracting %d/%d atoms for receptor, %d/%d atoms for ligand"%(len(receptor_list),count_r,len(ligand_list),count_l))
     final_receptor, final_ligand=Form_interface(rlist,llist,receptor_list,ligand_list)
 
@@ -337,20 +327,21 @@ def encode_atom_list(r_list,l_list,is_atom_list=False):
         new_list.append(new_row)
     return new_list
 
-def process_pdb_file_by_atom_N(input_pdb_file,sv_pdb_file,chian_id_1='A',chian_id_2='B',npoint=1000,med_out=True):
+def process_pdb_file_by_atom_N(input_pdb_file,sv_pdb_file, chain_ids_1=['A'], chain_ids_2=['B'], npoint=1000, med_out=True):
     """
     Input:
         input_pdb_file: input protein file (.pdb type)
         sv_pdb_file: output protein file (.pdb type)
-        chian_id_1: protein receptor chain name list, default=['A']
-        chian_id_2: protein ligrand chain name list, defualt=['B']
+        chian_ids_1: protein receptor chain name list, default=['A']
+        chian_ids_2: protein ligrand chain name list, defualt=['B']
         fix_atom_num: fix atom number
     Return:
         e_list: an encoder atom list, inclue [x,y,z,one-hot-res-type,one-hot-atom-type]
     """
     RES_TYPE_ORIGIN = ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 'THR', 'TRP', 'TYR', 'VAL']
     #Open a pdb file
-    final_receptor,final_ligand = Extract_Interface(input_pdb_file)
+    # chain_id_1 = receptor, chain_id_2 = ligand
+    final_receptor, final_ligand = Extract_Interface(input_pdb_file, chain_ids_1, chain_ids_2)
 
     if med_out:
         pdb_id = input_pdb_file.split(os.path.sep)[-2]
@@ -428,7 +419,7 @@ def preprocess_one_pdb_file(input_pdb_file_path,sv_name,sv_data_folder_path,npoi
         type: 'txt' or 'npz'
     """
     sv_pdb_file_path = os.path.join(sv_data_folder_path,sv_name)
-    output_point_cloud_data = process_pdb_file_by_atom_N(input_pdb_file_path,sv_pdb_file_path,['A'],['B'],npoint)
+    output_point_cloud_data = process_pdb_file_by_atom_N(input_pdb_file_path,sv_pdb_file_path, ['A'], ['B'], npoint)
     point = np.array(output_point_cloud_data)
     if type=='txt':
         np.savetxt(os.path.join(sv_data_folder_path,sv_name[:-4]+'.txt'),point,delimiter=' ')
@@ -489,7 +480,7 @@ def single_worker_by_file_list(pdb_file_list,input_dir,output_dir,error_dir,p_nu
 
 def main():
     args = parse_args()
-    provider.set_seed(args.seed)
+    #provider.set_seed(args.seed)
 
     DATASET_PATH = os.path.join(ROOT_DIR,args.dataset_dir)
     DATA_PATH = os.path.join(ROOT_DIR,args.data_folder)
