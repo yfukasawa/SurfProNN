@@ -415,14 +415,15 @@ class SurfProNN(nn.Module):
         self.EncP = EncP(
             in_channels, input_points, num_stages, embed_dim, k_neighbors, alpha, beta, LGA_block, dim_expansion, type
         )
-        self.out_channel = embed_dim
+        
+        # Calculate the output dimension from the encoder
+        structure_feature_dim = embed_dim
         for i in dim_expansion:
-            self.out_channel *= i
+            structure_feature_dim *= i
 
-        self.out_channel += 2048
-
-        self.classifier = nn.Sequential(
-            nn.Linear(self.out_channel, 512),
+        # Classifier for structure features ONLY
+        self.classifier_no_plm = nn.Sequential(
+            nn.Linear(structure_feature_dim, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
@@ -433,20 +434,41 @@ class SurfProNN(nn.Module):
             nn.Linear(256, class_num),
         )
 
-    def forward(self, x, plm):
+        # Classifier for combined structure and PLM features
+        combined_feature_dim = structure_feature_dim + 2048
+        self.classifier_with_plm = nn.Sequential(
+            nn.Linear(combined_feature_dim, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(256, class_num),
+        )
+
+    def forward(self, x, plm=None):
         # xyz: point coordinates
         # x: point features
 
-        x = self.EncP(x)  # 8 * 264
+        # Get structure features from the encoder
+        structure_features = self.EncP(x)
 
-        x = torch.cat([x, plm], axis=1)  # [B,out_idm,N]    # 8*2312 * 1
-        # temp = x
-        x = self.classifier(x)
+        if plm is not None:
+            # If PLM features are provided, combine them with structure features
+            combined_features = torch.cat([structure_features, plm], axis=1)
+            # Use the classifier designed for combined features
+            output = self.classifier_with_plm(combined_features)
+        else:
+            # If PLM features are not provided, use only structure features
+            # Use the classifier designed for structure features only
+            output = self.classifier_no_plm(structure_features)
 
-        x = torch.sigmoid(x)
-        x = x.view(-1)
+        output = torch.sigmoid(output)
+        output = output.view(-1)
 
-        return x
+        return output
 
 
 if __name__ == "__main__":
@@ -454,7 +476,8 @@ if __name__ == "__main__":
     xyz = torch.tensor(np.random.randint(0, 51, (32, 3, 1000)))
     point = torch.rand(32, 49, 1000)  # [B,D,N]  D = 29 + 7(atom_types) + 16(dmasif)
     point = torch.cat([xyz, point], axis=1).to(device)
-    plm = torch.rand(32, 2048).to(device)
+    #plm = torch.rand(32, 2048).to(device)
+    plm = None
     print("===> testing SurfProNN ...")
     model = SurfProNN().to(device)
 

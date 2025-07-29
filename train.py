@@ -70,7 +70,7 @@ def pc_normalize(pc):
 
 
 class DataLoader(Dataset):
-    def __init__(self, root, document, split='train', fold=1, use_res=True, use_more_class=False, use_plm=True):
+    def __init__(self, root, document, split='train', use_res=True, use_more_class=False, use_plm=True):
         self.root = root
         self.document = document
         self.use_res = use_res
@@ -93,12 +93,12 @@ class DataLoader(Dataset):
 
         if split == 'finetune':
             data_paths[split] = [self.root + '/' + line.split('\t')[0] + ' ' + line.split('\t')[1].rstrip() for line in
-                                 open(os.path.join(self.document, f"fold{fold}_train.txt"))]
+                                 open(os.path.join(self.document, "train.txt"))]
             data_paths[split].extend([self.root + '/' + line.split('\t')[0] + ' ' + line.split('\t')[1].rstrip() for line in
-                                 open(os.path.join(self.document, f"fold{fold}_valid.txt"))])
+                                 open(os.path.join(self.document, "valid.txt"))])
         else:
             data_paths[split] = [self.root + '/' + line.split('\t')[0] + ' ' + line.split('\t')[1].rstrip() for line in
-                             open(os.path.join(self.document, f"fold{fold}_{split}.txt"))]
+                             open(os.path.join(self.document, f"{split}.txt"))]
 
         self.datapath = data_paths[split]
         print('The size of %s data is %d' % (split, len(self.datapath)))
@@ -159,9 +159,12 @@ class DataLoader(Dataset):
 
         point_set = self.data[index]
         label = self.labels[index]
-        plm = self.plm_feature[index]
-        return point_set, label, plm
-      
+        if self.use_plm:
+            plm = self.plm_feature[index]
+            return point_set, label, plm
+        else:
+            return point_set, label, None
+
 def collate_fn(batch):
     f_num = batch[0][0].shape[1]
     max_natoms = 1000
@@ -174,13 +177,17 @@ def collate_fn(batch):
         num_atom = item[0].shape[0]
         point_set[i, :num_atom] = item[0]
         labels.append(item[1])
-        plms.append(item[2])
+        if item[2] is not None:
+            plms.append(item[2])
 
     labels = np.array(labels)
-    plms = np.array(plms)
+    if plms:
+        plms = np.array(plms)
+    else:
+        plms = None
     return point_set, labels, max_natoms, plms
 
-def train(args, fold=1):
+def train(args):
   args = parse_args()
 
   '''HYPER PARAMETER'''
@@ -199,7 +206,7 @@ def train(args, fold=1):
   if args.log_dir is None:
       experiment_dir_root = experiment_dir_root.joinpath(timestr)
   else:
-      experiment_dir_root = experiment_dir_root.joinpath(f"{args.log_dir}_FOLD{fold}")
+      experiment_dir_root = experiment_dir_root.joinpath(f"{args.log_dir}")
   experiment_dir_root.mkdir(exist_ok=True)
   experiment_dir = experiment_dir_root
 
@@ -218,7 +225,7 @@ def train(args, fold=1):
   if not os.path.exists(os.path.join(ROOT_DIR, 'runs', args.runs)):
       os.mkdir(os.path.join(ROOT_DIR, 'runs', args.runs))
 
-  writer_path = os.path.join(ROOT_DIR, 'runs', args.runs, f"FOLD{fold}")
+  writer_path = os.path.join(ROOT_DIR, 'runs', args.runs)
   Path(writer_path).mkdir(exist_ok=True)
   writer = SummaryWriter(writer_path)
 
@@ -230,8 +237,8 @@ def train(args, fold=1):
   DATA_PATH = os.path.join(ROOT_DIR, 'data')
   DATA_PATH = os.path.join(DATA_PATH, args.data_dir)
 
-  TRAIN_DATASET = DataLoader(root=DATA_PATH, document=DC_PATH, fold=fold, split='train', use_res=args.use_res, use_plm=args.use_plm)
-  VALID_DATASET = DataLoader(root=DATA_PATH, document=DC_PATH, fold=fold, split='valid', use_res=args.use_res, use_plm=args.use_plm)
+  TRAIN_DATASET = DataLoader(root=DATA_PATH, document=DC_PATH, split='train', use_res=args.use_res, use_plm=args.use_plm)
+  VALID_DATASET = DataLoader(root=DATA_PATH, document=DC_PATH, split='valid', use_res=args.use_res, use_plm=args.use_plm)
 
   '''MODEL LOADING'''
   log_string(logger, 'Load model ...')
@@ -255,12 +262,12 @@ def train(args, fold=1):
 
   try:
       checkpoint = torch.load(
-          os.path.join(ROOT_DIR, 'checkpoint', args.checkpoint, "FOLD" + str(fold), "last_model.pth"))
+          os.path.join(ROOT_DIR, 'checkpoint', args.checkpoint, "last_model.pth"))
       start_epoch = checkpoint['epoch']
       classifier.load_state_dict(checkpoint['model_state_dict'])
       log_string(logger, 'Use pretrain model')
   except:
-      Path(f"{ROOT_DIR}/checkpoint/{args.checkpoint}/FOLD{fold}").mkdir(exist_ok=True)
+      Path(f"{ROOT_DIR}/checkpoint/{args.checkpoint}").mkdir(exist_ok=True)
       log_string(logger, 'No existing model, starting training from scratch...')
       start_epoch = 0
 
@@ -311,14 +318,16 @@ def train(args, fold=1):
 
           points = torch.Tensor(points) 
           target = torch.Tensor(target)
-          plms = torch.Tensor(plms)
+          if plms is not None:
+              plms = torch.Tensor(plms)
+              plms = plms.to(device)
 
           points = points.transpose(2, 1)
-          points, target, plms = points.to(device), target.to(device), plms.to(device)
+          points, target = points.to(device), target.to(device)
           optimizer.zero_grad()
 
           classifier = classifier.train()
-          pred = classifier(points)
+          pred = classifier(points, plms)
           loss = criterion(pred, target)
 
           zero = torch.zeros_like(pred)
@@ -356,14 +365,15 @@ def train(args, fold=1):
           running_loss = 0.0
           class_acc = np.zeros((2, 3))
           for j, data in tqdm(enumerate(validDataLoader), total=len(validDataLoader)):
-              points, target, npoint,plm = data
+              points, target, npoint, plm = data
               points = torch.Tensor(points)
               target = torch.Tensor(target)
-              plm =  torch.Tensor(plm).to(device)
+              if plm is not None:
+                  plm =  torch.Tensor(plm).to(device)
               points = points.transpose(2, 1)
               points, target = points.to(device), target.to(device)
               classifier = classifier.eval()
-              pred = classifier(points)
+              pred = classifier(points, plm)
               loss = criterion(pred, target)
 
               zero = torch.zeros_like(pred)
@@ -403,8 +413,8 @@ def train(args, fold=1):
               best_class_acc = class_acc
               best_epoch = epoch + 1
               logger.info('Save model...')
-              Path(os.path.join('checkpoint', args.checkpoint, "FOLD" + str(fold))).mkdir(exist_ok=True)
-              savepath = os.path.join('checkpoint', args.checkpoint, "FOLD" + str(fold), 'best_model.pth')
+              Path(os.path.join('checkpoint', args.checkpoint)).mkdir(exist_ok=True)
+              savepath = os.path.join('checkpoint', args.checkpoint, 'best_model.pth')
               log_string(logger, 'Saving at %s' % savepath)
               state = {
                   'epoch': best_epoch,
@@ -416,7 +426,7 @@ def train(args, fold=1):
               torch.save(state, savepath)
           global_epoch += 1
 
-          savepath = os.path.join(ROOT_DIR, 'checkpoint', args.checkpoint, f"FOLD{fold}", f'epoch_{epoch}.pth')
+          savepath = os.path.join(ROOT_DIR, 'checkpoint', args.checkpoint, f'epoch_{epoch}.pth')
           log_string(logger, 'Saving at %s' % savepath)
           state = {
               'epoch': epoch,
@@ -439,8 +449,7 @@ def train(args, fold=1):
 
 
 def main(args):
-  for fold in range(1,5):
-      train(args,fold)
+  train(args)
 
 if __name__ == '__main__':
   args = parse_args()
