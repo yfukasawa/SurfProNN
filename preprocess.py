@@ -299,7 +299,9 @@ def encode_atom_list(r_list,l_list,is_atom_list=False):
     else:
         res_list = reduce(operator.add, r_list) + reduce(operator.add, l_list)
     
-    atom_names_origin = ['C', 'N', 'O', 'S', 'F', 'P', 'Cl', 'Br', 'B', 'H', 'Others']
+    #atom_names_origin = ['C', 'N', 'O', 'S', 'F', 'P', 'Cl', 'Br', 'B', 'H', 'Others']
+    atom_names_origin = ['B', 'Br', 'C', 'Cl', 'F', 'H', 'N', 'O', 'P', 'S', 'Others']
+    
     atom_names = np.array(atom_names_origin).reshape(len(atom_names_origin), -1)
     
     res_names_origin = ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 'THR', 'TRP', 'TYR', 'VAL']
@@ -318,7 +320,7 @@ def encode_atom_list(r_list,l_list,is_atom_list=False):
         xyz = np.array(row[0:3])
         resName = encode_res([row[4]],res_enc)[0]
         atomName =encode_res([row[3]],atom_enc)[0]
-        chain = row[-1]
+        chain = row[-2]
         if chain=="R":
             chain = np.array([1,0])
         else:
